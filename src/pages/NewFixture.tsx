@@ -1,32 +1,40 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { ArrowLeftIcon } from '@heroicons/react/24/outline'
+
+interface Team {
+  id: string
+  name: string
+}
 
 export default function NewFixture() {
   const [name, setName] = useState('')
   const [date, setDate] = useState('')
   const [team1, setTeam1] = useState('')
   const [team2, setTeam2] = useState('')
-  const [teams, setTeams] = useState<{ id: string; name: string }[]>([])
   const [overs, setOvers] = useState(20)
+  const [teams, setTeams] = useState<Team[]>([])
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const { user } = useAuth()
   const navigate = useNavigate()
 
-  const addTeam1Player = () => {
-    const player = team1PlayerName.trim()
-    if (!player) return
-    setTeam1Players(prev => [...prev, player])
-    setTeam1PlayerName('')
-  }
+  useEffect(() => {
+    fetchTeams()
+  }, [])
 
-  const addTeam2Player = () => {
-    const player = team2PlayerName.trim()
-    if (!player) return
-    setTeam2Players(prev => [...prev, player])
-    setTeam2PlayerName('')
+  const fetchTeams = async () => {
+    const { data, error } = await supabase.from('teams').select('id, name').order('name')
+    if (error) {
+      setError(error.message || 'Unable to load teams')
+      setLoading(false)
+      return
+    }
+
+    setTeams(data || [])
+    setLoading(false)
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -39,7 +47,7 @@ export default function NewFixture() {
     }
 
     if (!team1 || !team2) {
-      setError('Please select both teams for the fixture')
+      setError('Please select both teams')
       return
     }
 
@@ -53,113 +61,103 @@ export default function NewFixture() {
       return
     }
 
-    try {
-      const { data: fixtureData, error: fixtureError } = await supabase
-        .from('fixtures')
-        .insert({
-          name,
-          date,
-          team1,
-          team2,
-          overs,
-          created_by: user.id
-        })
-        .select()
-        .single()
+    const { error: insertError } = await supabase.from('fixtures').insert({
+      name,
+      date,
+      team1,
+      team2,
+      overs,
+      created_by: user.id
+    })
 
-      if (fixtureError) {
-        console.error('Fixture creation error:', fixtureError)
-        setError(fixtureError.message || 'Error creating fixture')
-        return
-      }
-
-      const playerInserts = [
-        ...team1Players.map(playerName => ({ name: playerName, team: team1, created_by: user.id })),
-        ...team2Players.map(playerName => ({ name: playerName, team: team2, created_by: user.id }))
-      ]
-
-      if (playerInserts.length > 0) {
-        const { error: playerError } = await supabase.from('players').insert(playerInserts)
-        if (playerError) {
-          console.error('Player insert error:', playerError)
-          setError(playerError.message || 'Error adding players')
-          return
-        }
-      }
-
-      if (!fixtureData) {
-        setError('Fixture created but unable to load data')
-        return
-      }
-
-      navigate('/fixtures')
-    } catch (err: any) {
-      console.error('Fixture creation unexpected error:', err)
-      setError(err?.message || 'Error creating fixture')
+    if (insertError) {
+      setError(insertError.message || 'Error creating fixture')
+      return
     }
+
+    navigate('/fixtures')
   }
 
   return (
-    <div className="max-w-md mx-auto">
-      <div className="flex items-center mb-6">
-        <button onClick={() => navigate('/fixtures')} className="mr-4 p-2 rounded-full hover:bg-green-100">
-          <ArrowLeftIcon className="h-6 w-6 text-green-600" />
+    <div className="max-w-md mx-auto space-y-4">
+      <div className="flex items-center gap-3">
+        <button onClick={() => navigate('/fixtures')} className="p-2 rounded-full bg-white shadow-sm hover:bg-green-100">
+          <ArrowLeftIcon className="h-5 w-5 text-green-700" />
         </button>
-        <h1 className="text-2xl font-bold text-green-800">Add New Fixture</h1>
+        <h1 className="text-2xl font-bold text-green-800">Create Fixture</h1>
       </div>
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <input
-          type="text"
-          placeholder="Fixture Name"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          className="w-full p-3 border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
-          required
-        />
-        <input
-          type="date"
-          value={date}
-          onChange={(e) => setDate(e.target.value)}
-          className="w-full p-3 border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
-          required
-        />
-        <select
-          value={team1}
-          onChange={(e) => setTeam1(e.target.value)}
-          className="w-full p-3 border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500"
-          required
-        >
-          <option value="">Select Team 1</option>
-          {teams.map(team => (
-            <option key={team.id} value={team.name}>{team.name}</option>
-          ))}
-        </select>
 
-        <select
-          value={team2}
-          onChange={(e) => setTeam2(e.target.value)}
-          className="w-full p-3 border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500"
-          required
-        >
-          <option value="">Select Team 2</option>
-          {teams.map(team => (
-            <option key={team.id} value={team.name}>{team.name}</option>
-          ))}
-        </select>
-        <input
-          type="number"
-          placeholder="Overs per team"
-          value={overs}
-          onChange={(e) => setOvers(Number(e.target.value))}
-          className="w-full p-3 border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
-          min="1"
-          required
-        />
-        {error && <p className="text-red-500 text-center">{error}</p>}
-        <button type="submit" className="w-full bg-yellow-500 text-green-800 p-3 rounded-lg hover:bg-yellow-400 transition-colors font-semibold">
-          Create Fixture
-        </button>
-      </form>
+      <div className="bg-white rounded-2xl shadow-md border border-green-100 p-4">
+        {loading ? (
+          <p className="text-slate-600">Loading teams...</p>
+        ) : teams.length < 2 ? (
+          <div className="space-y-3">
+            <p className="text-slate-700">Add at least 2 teams before creating a fixture.</p>
+            <Link to="/teams" className="inline-flex items-center justify-center w-full bg-green-700 text-white p-3 rounded-xl hover:bg-green-600">
+              Go To Team Management
+            </Link>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <input
+              type="text"
+              placeholder="Fixture name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full p-3 border border-green-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-transparent"
+              required
+            />
+
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="w-full p-3 border border-green-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-transparent"
+              required
+            />
+
+            <select
+              value={team1}
+              onChange={(e) => setTeam1(e.target.value)}
+              className="w-full p-3 border border-green-300 rounded-xl focus:ring-2 focus:ring-green-500"
+              required
+            >
+              <option value="">Select Team 1</option>
+              {teams.map((team) => (
+                <option key={team.id} value={team.name}>{team.name}</option>
+              ))}
+            </select>
+
+            <select
+              value={team2}
+              onChange={(e) => setTeam2(e.target.value)}
+              className="w-full p-3 border border-green-300 rounded-xl focus:ring-2 focus:ring-green-500"
+              required
+            >
+              <option value="">Select Team 2</option>
+              {teams.map((team) => (
+                <option key={team.id} value={team.name}>{team.name}</option>
+              ))}
+            </select>
+
+            <input
+              type="number"
+              placeholder="Overs per team"
+              value={overs}
+              onChange={(e) => setOvers(Number(e.target.value))}
+              className="w-full p-3 border border-green-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-transparent"
+              min="1"
+              required
+            />
+
+            {error && <p className="text-red-500 text-center">{error}</p>}
+
+            <button type="submit" className="w-full bg-yellow-500 text-green-900 p-3 rounded-xl hover:bg-yellow-400 transition-colors font-semibold">
+              Create Fixture
+            </button>
+          </form>
+        )}
+      </div>
     </div>
   )
 }

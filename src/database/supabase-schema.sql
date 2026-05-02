@@ -12,21 +12,6 @@ CREATE TABLE IF NOT EXISTS profiles (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Players table
-CREATE TABLE IF NOT EXISTS players (
-  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-  name TEXT NOT NULL,
-  team TEXT,
-  team_id UUID REFERENCES teams(id),
-  created_by UUID REFERENCES profiles(id),
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
-ALTER TABLE players
-  ADD COLUMN IF NOT EXISTS team TEXT;
-ALTER TABLE players
-  ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES teams(id);
-
 -- Teams table
 CREATE TABLE IF NOT EXISTS teams (
   id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
@@ -34,6 +19,18 @@ CREATE TABLE IF NOT EXISTS teams (
   created_by UUID REFERENCES profiles(id),
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Players table
+CREATE TABLE IF NOT EXISTS players (
+  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+  name TEXT NOT NULL,
+  team TEXT,
+  created_by UUID REFERENCES profiles(id),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+ALTER TABLE players
+  ADD COLUMN IF NOT EXISTS team TEXT;
 
 -- Fixtures table
 CREATE TABLE IF NOT EXISTS fixtures (
@@ -108,9 +105,16 @@ CREATE TABLE IF NOT EXISTS balls (
   runs INTEGER DEFAULT 0,
   extras_type TEXT CHECK (extras_type IN ('wide', 'noball', 'bye', 'legbye', NULL)),
   extras_runs INTEGER DEFAULT 0,
+  is_wicket BOOLEAN DEFAULT FALSE,
+  commentary TEXT,
   ball_number DECIMAL(4,1) NOT NULL,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+ALTER TABLE balls
+  ADD COLUMN IF NOT EXISTS is_wicket BOOLEAN DEFAULT FALSE;
+ALTER TABLE balls
+  ADD COLUMN IF NOT EXISTS commentary TEXT;
 
 -- Scorecard table (player stats per innings)
 CREATE TABLE IF NOT EXISTS scorecard (
@@ -130,6 +134,7 @@ CREATE TABLE IF NOT EXISTS scorecard (
 
 -- Enable RLS (safe to run multiple times)
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
 ALTER TABLE players ENABLE ROW LEVEL SECURITY;
 ALTER TABLE fixtures ENABLE ROW LEVEL SECURITY;
 ALTER TABLE matches ENABLE ROW LEVEL SECURITY;
@@ -140,6 +145,8 @@ ALTER TABLE scorecard ENABLE ROW LEVEL SECURITY;
 -- Drop existing policies if they exist, then create new ones
 DROP POLICY IF EXISTS "Users can view own profile" ON profiles;
 DROP POLICY IF EXISTS "Users can update own profile" ON profiles;
+DROP POLICY IF EXISTS "Anyone can view teams" ON teams;
+DROP POLICY IF EXISTS "Authenticated users can create teams" ON teams;
 DROP POLICY IF EXISTS "Anyone can view players" ON players;
 DROP POLICY IF EXISTS "Authenticated users can create players" ON players;
 DROP POLICY IF EXISTS "Anyone can view fixtures" ON fixtures;
@@ -148,6 +155,7 @@ DROP POLICY IF EXISTS "Users can update own fixtures" ON fixtures;
 DROP POLICY IF EXISTS "Anyone can view matches with code" ON matches;
 DROP POLICY IF EXISTS "Authenticated users can create matches" ON matches;
 DROP POLICY IF EXISTS "Authenticated users can update matches" ON matches;
+DROP POLICY IF EXISTS "Authenticated users can delete matches" ON matches;
 DROP POLICY IF EXISTS "Anyone can view innings" ON innings;
 DROP POLICY IF EXISTS "Authenticated users can manage innings" ON innings;
 DROP POLICY IF EXISTS "Anyone can view balls" ON balls;
@@ -158,6 +166,10 @@ DROP POLICY IF EXISTS "Authenticated users can manage scorecard" ON scorecard;
 -- Profiles: Users can read/update their own profile
 CREATE POLICY "Users can view own profile" ON profiles FOR SELECT USING (auth.uid() = id);
 CREATE POLICY "Users can update own profile" ON profiles FOR UPDATE USING (auth.uid() = id);
+
+-- Teams: Anyone can read, authenticated users can create
+CREATE POLICY "Anyone can view teams" ON teams FOR SELECT USING (true);
+CREATE POLICY "Authenticated users can create teams" ON teams FOR INSERT WITH CHECK (auth.role() = 'authenticated');
 
 -- Players: Anyone can read, authenticated users can create
 CREATE POLICY "Anyone can view players" ON players FOR SELECT USING (true);
@@ -172,6 +184,7 @@ CREATE POLICY "Users can update own fixtures" ON fixtures FOR UPDATE USING (auth
 CREATE POLICY "Anyone can view matches with code" ON matches FOR SELECT USING (true);
 CREATE POLICY "Authenticated users can create matches" ON matches FOR INSERT WITH CHECK (auth.role() = 'authenticated');
 CREATE POLICY "Authenticated users can update matches" ON matches FOR UPDATE USING (auth.role() = 'authenticated');
+CREATE POLICY "Authenticated users can delete matches" ON matches FOR DELETE USING (auth.role() = 'authenticated');
 
 -- Innings: Same as matches
 CREATE POLICY "Anyone can view innings" ON innings FOR SELECT USING (true);
@@ -220,6 +233,29 @@ $$ LANGUAGE plpgsql;
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_matches_code ON matches(code);
 CREATE INDEX IF NOT EXISTS idx_matches_fixture ON matches(fixture_id);
+
+-- Keep only the newest active match per fixture before enforcing uniqueness
+WITH ranked_active_matches AS (
+  SELECT
+    id,
+    fixture_id,
+    ROW_NUMBER() OVER (
+      PARTITION BY fixture_id
+      ORDER BY updated_at DESC, created_at DESC, id DESC
+    ) AS rn
+  FROM matches
+  WHERE status = 'active'
+)
+UPDATE matches
+SET status = 'completed',
+    updated_at = NOW()
+WHERE id IN (
+  SELECT id
+  FROM ranked_active_matches
+  WHERE rn > 1
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_active_match_per_fixture ON matches(fixture_id) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_innings_match ON innings(match_id);
 CREATE INDEX IF NOT EXISTS idx_balls_innings ON balls(innings_id);
 CREATE INDEX IF NOT EXISTS idx_scorecard_innings ON scorecard(innings_id);

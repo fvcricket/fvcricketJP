@@ -9,6 +9,7 @@ interface MatchData {
   code: string
   fixture_id: string
   status: 'active' | 'completed' | 'abandoned'
+  current_scorer?: string | null
   toss_winner: string
   elected_to_bat: string
   innings1_id?: string | null

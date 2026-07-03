@@ -8,9 +8,26 @@ CREATE TABLE IF NOT EXISTS profiles (
   id UUID REFERENCES auth.users(id) PRIMARY KEY,
   email TEXT UNIQUE NOT NULL,
   full_name TEXT,
+  role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin', 'superadmin')),
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+ALTER TABLE profiles
+  ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'profiles_role_check'
+  ) THEN
+    ALTER TABLE profiles
+      ADD CONSTRAINT profiles_role_check
+      CHECK (role IN ('user', 'admin', 'superadmin'));
+  END IF;
+END $$;
 
 -- Teams table
 CREATE TABLE IF NOT EXISTS teams (
@@ -145,10 +162,14 @@ ALTER TABLE scorecard ENABLE ROW LEVEL SECURITY;
 -- Drop existing policies if they exist, then create new ones
 DROP POLICY IF EXISTS "Users can view own profile" ON profiles;
 DROP POLICY IF EXISTS "Users can update own profile" ON profiles;
+DROP POLICY IF EXISTS "Admins can view all profiles" ON profiles;
+DROP POLICY IF EXISTS "Admins can update all profiles" ON profiles;
 DROP POLICY IF EXISTS "Anyone can view teams" ON teams;
 DROP POLICY IF EXISTS "Authenticated users can create teams" ON teams;
+DROP POLICY IF EXISTS "Authenticated users can delete teams" ON teams;
 DROP POLICY IF EXISTS "Anyone can view players" ON players;
 DROP POLICY IF EXISTS "Authenticated users can create players" ON players;
+DROP POLICY IF EXISTS "Authenticated users can delete players" ON players;
 DROP POLICY IF EXISTS "Anyone can view fixtures" ON fixtures;
 DROP POLICY IF EXISTS "Authenticated users can create fixtures" ON fixtures;
 DROP POLICY IF EXISTS "Users can update own fixtures" ON fixtures;
@@ -156,6 +177,8 @@ DROP POLICY IF EXISTS "Anyone can view matches with code" ON matches;
 DROP POLICY IF EXISTS "Authenticated users can create matches" ON matches;
 DROP POLICY IF EXISTS "Authenticated users can update matches" ON matches;
 DROP POLICY IF EXISTS "Authenticated users can delete matches" ON matches;
+DROP POLICY IF EXISTS "Match owner can delete matches" ON matches;
+DROP POLICY IF EXISTS "Admins can delete matches" ON matches;
 DROP POLICY IF EXISTS "Anyone can view innings" ON innings;
 DROP POLICY IF EXISTS "Authenticated users can manage innings" ON innings;
 DROP POLICY IF EXISTS "Anyone can view balls" ON balls;
@@ -166,37 +189,65 @@ DROP POLICY IF EXISTS "Authenticated users can manage scorecard" ON scorecard;
 -- Profiles: Users can read/update their own profile
 CREATE POLICY "Users can view own profile" ON profiles FOR SELECT USING (auth.uid() = id);
 CREATE POLICY "Users can update own profile" ON profiles FOR UPDATE USING (auth.uid() = id);
+CREATE POLICY "Admins can view all profiles" ON profiles FOR SELECT USING (
+  EXISTS (
+    SELECT 1
+    FROM profiles AS current_profile
+    WHERE current_profile.id = auth.uid()
+      AND current_profile.role IN ('admin', 'superadmin')
+  )
+);
+CREATE POLICY "Admins can update all profiles" ON profiles FOR UPDATE USING (
+  EXISTS (
+    SELECT 1
+    FROM profiles AS current_profile
+    WHERE current_profile.id = auth.uid()
+      AND current_profile.role IN ('admin', 'superadmin')
+  )
+);
 
--- Teams: Anyone can read, authenticated users can create
+-- Teams: Anyone can read, authenticated users can create/delete
 CREATE POLICY "Anyone can view teams" ON teams FOR SELECT USING (true);
-CREATE POLICY "Authenticated users can create teams" ON teams FOR INSERT WITH CHECK (auth.role() = 'authenticated');
+CREATE POLICY "Authenticated users can create teams" ON teams FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "Authenticated users can delete teams" ON teams FOR DELETE USING (auth.uid() IS NOT NULL);
 
--- Players: Anyone can read, authenticated users can create
+-- Players: Anyone can read, authenticated users can create/delete
 CREATE POLICY "Anyone can view players" ON players FOR SELECT USING (true);
-CREATE POLICY "Authenticated users can create players" ON players FOR INSERT WITH CHECK (auth.role() = 'authenticated');
+CREATE POLICY "Authenticated users can create players" ON players FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "Authenticated users can delete players" ON players FOR DELETE USING (auth.uid() IS NOT NULL);
 
--- Fixtures: Anyone can read, authenticated users can create/update their own
+-- Fixtures: Anyone can read, authenticated users can create/update
 CREATE POLICY "Anyone can view fixtures" ON fixtures FOR SELECT USING (true);
-CREATE POLICY "Authenticated users can create fixtures" ON fixtures FOR INSERT WITH CHECK (auth.role() = 'authenticated');
-CREATE POLICY "Users can update own fixtures" ON fixtures FOR UPDATE USING (auth.uid() = created_by);
+CREATE POLICY "Authenticated users can create fixtures" ON fixtures FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "Users can update own fixtures" ON fixtures FOR UPDATE USING (auth.uid() IS NOT NULL);
 
--- Matches: Anyone can read with code, authenticated users can create/update
+-- Matches: Anyone can read, authenticated users can create/update
 CREATE POLICY "Anyone can view matches with code" ON matches FOR SELECT USING (true);
-CREATE POLICY "Authenticated users can create matches" ON matches FOR INSERT WITH CHECK (auth.role() = 'authenticated');
-CREATE POLICY "Authenticated users can update matches" ON matches FOR UPDATE USING (auth.role() = 'authenticated');
-CREATE POLICY "Authenticated users can delete matches" ON matches FOR DELETE USING (auth.role() = 'authenticated');
+CREATE POLICY "Authenticated users can create matches" ON matches FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "Authenticated users can update matches" ON matches FOR UPDATE USING (auth.uid() IS NOT NULL);
+CREATE POLICY "Match owner can delete matches" ON matches FOR DELETE USING (
+  current_scorer = auth.uid()
+);
+CREATE POLICY "Admins can delete matches" ON matches FOR DELETE USING (
+  EXISTS (
+    SELECT 1
+    FROM profiles AS current_profile
+    WHERE current_profile.id = auth.uid()
+      AND current_profile.role IN ('admin', 'superadmin')
+  )
+);
 
--- Innings: Same as matches
+-- Innings: Anyone can read, authenticated users can manage
 CREATE POLICY "Anyone can view innings" ON innings FOR SELECT USING (true);
-CREATE POLICY "Authenticated users can manage innings" ON innings FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Authenticated users can manage innings" ON innings FOR ALL USING (auth.uid() IS NOT NULL);
 
--- Balls: Same
+-- Balls: Anyone can read, authenticated users can manage
 CREATE POLICY "Anyone can view balls" ON balls FOR SELECT USING (true);
-CREATE POLICY "Authenticated users can manage balls" ON balls FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Authenticated users can manage balls" ON balls FOR ALL USING (auth.uid() IS NOT NULL);
 
--- Scorecard: Same
+-- Scorecard: Anyone can read, authenticated users can manage
 CREATE POLICY "Anyone can view scorecard" ON scorecard FOR SELECT USING (true);
-CREATE POLICY "Authenticated users can manage scorecard" ON scorecard FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Authenticated users can manage scorecard" ON scorecard FOR ALL USING (auth.uid() IS NOT NULL);
 
 -- Functions and Triggers
 
@@ -204,8 +255,8 @@ CREATE POLICY "Authenticated users can manage scorecard" ON scorecard FOR ALL US
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
-  INSERT INTO public.profiles (id, email, full_name)
-  VALUES (NEW.id, NEW.email, NEW.raw_user_meta_data->>'full_name');
+  INSERT INTO public.profiles (id, email, full_name, role)
+  VALUES (NEW.id, NEW.email, NEW.raw_user_meta_data->>'full_name', 'user');
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { HashRouter as Router, Routes, Route, Link, NavLink, useLocation } from 'react-router-dom'
+import { HashRouter as Router, Routes, Route, Link, NavLink, useLocation, Navigate } from 'react-router-dom'
 import {
   Bars3Icon,
   HomeIcon,
@@ -10,6 +10,7 @@ import {
   XMarkIcon
 } from '@heroicons/react/24/outline'
 import { AuthProvider } from './contexts/AuthContext'
+import { useAuth } from './contexts/AuthContext'
 import Home from './pages/Home'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
@@ -23,15 +24,18 @@ import AdminPanel from './pages/AdminPanel'
 
 function AppShell() {
   const location = useLocation()
+  const { isAdmin } = useAuth()
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const logoSrc = `${import.meta.env.BASE_URL}cricket_playing.png`
   const navItems = [
     { to: '/', label: 'Home', icon: HomeIcon },
     { to: '/fixtures', label: 'Fixtures', icon: CalendarDaysIcon },
     { to: '/matches', label: 'Scorecards', icon: ClipboardDocumentListIcon },
-    { to: '/teams', label: 'Teams', icon: UserGroupIcon },
-    { to: '/admin', label: 'Admin', icon: ShieldCheckIcon }
+    { to: '/teams', label: 'Teams', icon: UserGroupIcon }
   ]
+  if (isAdmin) {
+    navItems.push({ to: '/admin', label: 'Admin', icon: ShieldCheckIcon })
+  }
   const currentPath = location.pathname
   const breadcrumbParts = (() => {
     if (currentPath.startsWith('/match/')) {
@@ -187,7 +191,7 @@ function AppShell() {
             <Route path="/new-match" element={<NewMatch />} />
             <Route path="/teams" element={<Teams />} />
             <Route path="/matches" element={<Matches />} />
-            <Route path="/admin" element={<AdminPanel />} />
+            <Route path="/admin" element={isAdmin ? <AdminPanel /> : <Navigate to="/" replace />} />
             <Route path="/match/:id" element={<Match />} />
           </Routes>
         </div>
@@ -201,7 +205,7 @@ function AppShell() {
             rel="noopener noreferrer"
             className="text-yellow-300 hover:text-yellow-200 transition-colors"
           >
-            Visit NC Bulls Cricket Club
+            NC Bulls Cricket Club
           </a>
         </div>
       </footer>

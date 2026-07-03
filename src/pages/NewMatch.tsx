@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
-import { useNavigate, useSearchParams } from 'react-router-dom'
-import { ArrowLeftIcon } from '@heroicons/react/24/outline'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { ArrowLeftIcon, PlusIcon } from '@heroicons/react/24/outline'
 
 interface Fixture {
   id: string
@@ -23,13 +23,30 @@ export default function NewMatch() {
   const [existingTeam1Players, setExistingTeam1Players] = useState<string[]>([])
   const [existingTeam2Players, setExistingTeam2Players] = useState<string[]>([])
   const [error, setError] = useState('')
-  const { user } = useAuth()
+  const { user, loading: authLoading } = useAuth()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
 
   useEffect(() => {
-    fetchFixtures()
-  }, [])
+    if (authLoading) return
+    void fetchFixtures()
+  }, [authLoading])
+
+  useEffect(() => {
+    const onFocus = () => {
+      if (!authLoading) {
+        void fetchFixtures()
+      }
+    }
+
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onFocus)
+
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onFocus)
+    }
+  }, [authLoading])
 
   useEffect(() => {
     const fixtureId = searchParams.get('fixture')
@@ -50,8 +67,14 @@ export default function NewMatch() {
   }, [selectedFixture, fixtures])
 
   const fetchFixtures = async () => {
-    const { data } = await supabase.from('fixtures').select('*')
+    const { data, error } = await supabase.from('fixtures').select('*')
+    if (error) {
+      setError(error.message || 'Unable to load fixtures')
+      return
+    }
+
     setFixtures(data || [])
+    setError('')
   }
 
   const fetchExistingPlayers = async (team1Name: string, team2Name: string) => {
@@ -72,8 +95,13 @@ export default function NewMatch() {
   }
 
   const startMatch = async () => {
-    if (!selectedFixture || !tossWinner || !electedToBat || !user) {
+    if (!selectedFixture || !tossWinner || !electedToBat) {
       setError('Please select fixture, toss winner, and batting choice.')
+      return
+    }
+
+    if (!user) {
+      setError('You must be signed in to start a match. Please sign in and try again.')
       return
     }
 
@@ -107,8 +135,8 @@ export default function NewMatch() {
     const uniqueTeam2Players = team2Players.filter((playerName) => !existingTeam2Players.includes(playerName))
 
     const playerInserts = [
-      ...uniqueTeam1Players.map(playerName => ({ name: playerName, team: fixture.team1, created_by: user.id })),
-      ...uniqueTeam2Players.map(playerName => ({ name: playerName, team: fixture.team2, created_by: user.id }))
+      ...uniqueTeam1Players.map(playerName => ({ name: playerName, team: fixture.team1 })),
+      ...uniqueTeam2Players.map(playerName => ({ name: playerName, team: fixture.team2 }))
     ]
 
     if (playerInserts.length > 0) {
@@ -159,10 +187,34 @@ export default function NewMatch() {
         <h1 className="text-2xl font-bold text-green-800">Start New Match</h1>
       </div>
       <div className="space-y-4 bg-white rounded-2xl border border-green-100 shadow-sm p-4">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-sm font-semibold text-green-900">Fixture</p>
+          <Link
+            to={user ? '/new-fixture' : '/login'}
+            className="inline-flex items-center gap-1 rounded-xl bg-yellow-500 px-3 py-2 text-sm font-semibold text-green-900 hover:bg-yellow-400"
+          >
+            <PlusIcon className="h-4 w-4" />
+            New Fixture
+          </Link>
+        </div>
+
+        {fixtures.length === 0 && (
+          <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-3 space-y-2">
+            <p className="text-sm text-yellow-900">No fixtures found. Create a fixture before starting a match.</p>
+            <Link
+              to={user ? '/new-fixture' : '/login'}
+              className="inline-flex items-center justify-center w-full rounded-xl bg-green-700 px-3 py-2.5 text-sm font-semibold text-white hover:bg-green-600"
+            >
+              {user ? 'Create Fixture' : 'Sign In To Create Fixture'}
+            </Link>
+          </div>
+        )}
+
         <select
           value={selectedFixture}
           onChange={(e) => setSelectedFixture(e.target.value)}
           className="w-full p-3.5 border border-green-300 rounded-xl focus:ring-2 focus:ring-green-500"
+          disabled={fixtures.length === 0}
         >
           <option value="">Select a fixture</option>
           {fixtures.map(fixture => (
@@ -281,10 +333,15 @@ export default function NewMatch() {
           </>
         )}
 
+        {!user && (
+          <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-900">
+            You must be <Link to="/login" className="font-semibold underline">signed in</Link> to start a match.
+          </div>
+        )}
         {error && <p className="text-red-500 text-center">{error}</p>}
         <button
           onClick={startMatch}
-          disabled={!selectedFixture || !tossWinner || !electedToBat}
+          disabled={!selectedFixture || !tossWinner || !electedToBat || !user}
           className="w-full bg-yellow-500 text-green-800 p-3.5 rounded-xl hover:bg-yellow-400 disabled:opacity-50 disabled:cursor-not-allowed font-semibold text-base"
         >
           Start Match

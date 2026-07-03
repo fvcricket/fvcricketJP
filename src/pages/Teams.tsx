@@ -71,13 +71,25 @@ export default function Teams() {
     const name = teamName.trim()
     if (!name) return
 
-    const { error } = await supabase.from('teams').insert({
-      name,
-      created_by: user.id
-    })
+    const exists = teams.some((team) => team.name.toLowerCase() === name.toLowerCase())
+    if (exists) {
+      setError('Team already exists')
+      return
+    }
+
+    const { error } = await supabase.from('teams').insert({ name })
 
     if (error) {
-      setError(error.message || 'Unable to add team')
+      const message = error.message || 'Unable to add team'
+      if (message.toLowerCase().includes('duplicate key') || message.toLowerCase().includes('unique')) {
+        setError('Team already exists')
+        return
+      }
+      if (message.toLowerCase().includes('row-level security')) {
+        setError('Not allowed to add team. Please sign in again and retry.')
+        return
+      }
+      setError(message)
       return
     }
 
@@ -97,14 +109,23 @@ export default function Teams() {
     const name = playerName.trim()
     if (!name || !selectedTeam) return
 
-    const { error } = await supabase.from('players').insert({
-      name,
-      team: selectedTeam,
-      created_by: user.id
-    })
+    const exists = players.some(
+      (player) => (player.team || '').toLowerCase() === selectedTeam.toLowerCase() && player.name.toLowerCase() === name.toLowerCase()
+    )
+    if (exists) {
+      setError('Player already exists in this team')
+      return
+    }
+
+    const { error } = await supabase.from('players').insert({ name, team: selectedTeam })
 
     if (error) {
-      setError(error.message || 'Unable to add player')
+      const message = error.message || 'Unable to add player'
+      if (message.toLowerCase().includes('row-level security')) {
+        setError('Not allowed to add player. Please sign in again and retry.')
+        return
+      }
+      setError(message)
       return
     }
 
@@ -134,6 +155,13 @@ export default function Teams() {
 
       {error && <p className="text-red-500 text-center">{error}</p>}
 
+      {!user && (
+        <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-900">
+          Sign in is required to add teams and players.
+          <Link to="/login" className="ml-1 font-semibold underline">Go to login</Link>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-4 space-y-3">
           <h2 className="text-lg font-semibold text-green-800">Create Team</h2>
@@ -143,10 +171,11 @@ export default function Teams() {
               placeholder="Team name"
               value={teamName}
               onChange={(e) => setTeamName(e.target.value)}
+              disabled={!user}
               className="w-full p-3.5 border border-green-300 rounded-xl focus:ring-2 focus:ring-green-500"
               required
             />
-            <button type="submit" className="w-full inline-flex items-center justify-center gap-2 bg-green-700 text-white p-3.5 rounded-xl hover:bg-green-600 font-semibold text-base">
+            <button type="submit" disabled={!user} className="w-full inline-flex items-center justify-center gap-2 bg-green-700 text-white p-3.5 rounded-xl hover:bg-green-600 font-semibold text-base disabled:opacity-60 disabled:cursor-not-allowed">
               <PlusIcon className="h-5 w-5" />
               Add Team
             </button>
@@ -174,6 +203,7 @@ export default function Teams() {
             <select
               value={selectedTeam}
               onChange={(e) => setSelectedTeam(e.target.value)}
+              disabled={!user}
               className="w-full p-3.5 border border-green-300 rounded-xl focus:ring-2 focus:ring-green-500"
               required
             >
@@ -187,10 +217,11 @@ export default function Teams() {
               placeholder="Player name"
               value={playerName}
               onChange={(e) => setPlayerName(e.target.value)}
+              disabled={!user}
               className="w-full p-3.5 border border-green-300 rounded-xl focus:ring-2 focus:ring-green-500"
               required
             />
-            <button type="submit" className="w-full inline-flex items-center justify-center gap-2 bg-yellow-500 text-green-900 p-3.5 rounded-xl hover:bg-yellow-400 font-semibold text-base">
+            <button type="submit" disabled={!user} className="w-full inline-flex items-center justify-center gap-2 bg-yellow-500 text-green-900 p-3.5 rounded-xl hover:bg-yellow-400 font-semibold text-base disabled:opacity-60 disabled:cursor-not-allowed">
               <PlusIcon className="h-5 w-5" />
               Add Player
             </button>
@@ -200,7 +231,7 @@ export default function Teams() {
             {selectedTeam && (playersByTeam[selectedTeam] || []).map((player) => (
               <div key={player.id} className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-200">
                 <span className="text-slate-700">{player.name}</span>
-                <button onClick={() => removePlayer(player.id)} className="text-red-500 hover:text-red-700" title="Remove player">
+                <button onClick={() => removePlayer(player.id)} disabled={!user} className="text-red-500 hover:text-red-700 disabled:opacity-50" title="Remove player">
                   <TrashIcon className="h-5 w-5" />
                 </button>
               </div>

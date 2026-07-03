@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ArrowLeftIcon, TrashIcon, FunnelIcon, MagnifyingGlassIcon, EyeIcon } from '@heroicons/react/24/outline'
 import { supabase } from '../lib/supabase'
+import { useAuth, type UserRole } from '../contexts/AuthContext'
 
 interface MatchItem {
   id: string
@@ -15,21 +16,35 @@ interface MatchItem {
   }
 }
 
+interface ProfileItem {
+  id: string
+  email: string
+  full_name: string | null
+  role: UserRole
+}
+
 export default function AdminPanel() {
   const navigate = useNavigate()
+  const { user, role, isAdmin, isSuperAdmin } = useAuth()
   const [matches, setMatches] = useState<MatchItem[]>([])
+  const [profiles, setProfiles] = useState<ProfileItem[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [deletingId, setDeletingId] = useState('')
+  const [updatingUserId, setUpdatingUserId] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | MatchItem['status']>('all')
   const [searchTerm, setSearchTerm] = useState('')
 
   useEffect(() => {
-    void fetchMatches()
+    if (!isAdmin) {
+      setLoading(false)
+      return
+    }
+
+    void Promise.all([fetchMatches(), fetchProfiles()]).finally(() => setLoading(false))
   }, [])
 
   const fetchMatches = async () => {
-    setLoading(true)
     const { data, error } = await supabase
       .from('matches')
       .select('id, code, status, created_at, fixture:fixtures(name, team1, team2)')
@@ -37,15 +52,70 @@ export default function AdminPanel() {
 
     if (error) {
       setError(error.message || 'Unable to load scorecards')
-      setLoading(false)
       return
     }
 
     setMatches((data as unknown as MatchItem[]) || [])
-    setLoading(false)
+  }
+
+  const fetchProfiles = async () => {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id, email, full_name, role')
+      .order('created_at', { ascending: true })
+
+    if (error) {
+      setError(error.message || 'Unable to load user roles')
+      return
+    }
+
+    setProfiles(((data || []) as ProfileItem[]).map((profile) => ({
+      ...profile,
+      role: profile.role || 'user'
+    })))
+  }
+
+  const updateUserRole = async (targetUserId: string, nextRole: UserRole) => {
+    if (!isAdmin) {
+      setError('Only admin or superadmin can update roles')
+      return
+    }
+
+    const current = profiles.find((profile) => profile.id === targetUserId)
+    if (!current) return
+
+    if (!isSuperAdmin && current.role === 'superadmin') {
+      setError('Only superadmin can edit another superadmin role')
+      return
+    }
+
+    if (!isSuperAdmin && nextRole === 'superadmin') {
+      setError('Only superadmin can assign superadmin role')
+      return
+    }
+
+    setUpdatingUserId(targetUserId)
+    const { error } = await supabase
+      .from('profiles')
+      .update({ role: nextRole })
+      .eq('id', targetUserId)
+
+    if (error) {
+      setError(error.message || 'Unable to update user role')
+      setUpdatingUserId('')
+      return
+    }
+
+    setProfiles((prev) => prev.map((profile) => (profile.id === targetUserId ? { ...profile, role: nextRole } : profile)))
+    setUpdatingUserId('')
   }
 
   const deleteMatch = async (matchId: string) => {
+    if (!isAdmin) {
+      setError('Only admin or superadmin can delete scorecards')
+      return
+    }
+
     const confirmed = window.confirm('Delete this scorecard? This cannot be undone.')
     if (!confirmed) return
 
@@ -86,6 +156,20 @@ export default function AdminPanel() {
 
   const activeCount = matches.filter((match) => match.status === 'active').length
   const completedCount = matches.filter((match) => match.status === 'completed').length
+
+  if (!isAdmin) {
+    return (
+      <div className="max-w-3xl mx-auto space-y-4">
+        <div className="flex items-center gap-3">
+          <button onClick={() => navigate(-1)} className="p-2 rounded-full bg-white shadow-sm hover:bg-green-100">
+            <ArrowLeftIcon className="h-5 w-5 text-green-700" />
+          </button>
+          <h1 className="text-2xl font-bold text-green-900">Admin Scorecard Panel</h1>
+        </div>
+        <p className="text-red-600">Only admin and superadmin can access this panel.</p>
+      </div>
+    )
+  }
 
   return (
     <div className="max-w-3xl mx-auto space-y-4">
@@ -136,6 +220,42 @@ export default function AdminPanel() {
             <option value="completed">Completed</option>
             <option value="abandoned">Abandoned</option>
           </select>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-4 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-green-900 font-semibold">Manage User Roles</h2>
+          <span className="text-xs rounded-full bg-slate-100 text-slate-700 px-2 py-1">Your role: {role}</span>
+        </div>
+        <div className="space-y-2">
+          {profiles.length === 0 && !loading && <p className="text-sm text-slate-500">No users found.</p>}
+          {profiles.map((profile) => {
+            const isSelf = profile.id === user?.id
+            const disableRoleChange =
+              updatingUserId === profile.id ||
+              (!isSuperAdmin && profile.role === 'superadmin') ||
+              (!isSuperAdmin && isSelf)
+
+            return (
+              <div key={profile.id} className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-2 items-center rounded-xl border border-slate-200 p-3 bg-slate-50">
+                <div>
+                  <p className="font-medium text-slate-800">{profile.full_name || profile.email}</p>
+                  <p className="text-xs text-slate-500">{profile.email}</p>
+                </div>
+                <select
+                  value={profile.role}
+                  disabled={disableRoleChange}
+                  onChange={(e) => void updateUserRole(profile.id, e.target.value as UserRole)}
+                  className="rounded-xl border border-green-200 px-3 py-2 text-sm outline-none focus:border-green-500 disabled:opacity-60"
+                >
+                  <option value="user">user</option>
+                  <option value="admin">admin</option>
+                  {isSuperAdmin && <option value="superadmin">superadmin</option>}
+                </select>
+              </div>
+            )
+          })}
         </div>
       </div>
 

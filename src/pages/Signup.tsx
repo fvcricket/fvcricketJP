@@ -7,18 +7,34 @@ export default function Signup() {
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState('')
-  const { signUp, signIn } = useAuth()
+  const [success, setSuccess] = useState('')
+  const { signUp } = useAuth()
   const navigate = useNavigate()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    setError('')
+    setSuccess('')
+
+    const normalizedEmail = email.trim()
+
     if (password !== confirmPassword) {
       setError('Passwords do not match')
       return
     }
+
     try {
-      await signUp(email, password)
-      await signIn(email, password)
+      const { requiresEmailConfirmation } = await signUp(normalizedEmail, password)
+
+      if (requiresEmailConfirmation) {
+        navigate('/login', {
+          state: {
+            notice: 'Account created. Please check your email to confirm your account, then sign in.'
+          }
+        })
+        return
+      }
+
       navigate('/')
     } catch (err: any) {
       setError(err.message || 'Error creating account')
@@ -54,6 +70,7 @@ export default function Signup() {
           required
         />
         {error && <p className="text-red-500 text-center">{error}</p>}
+        {success && <p className="text-green-700 text-center">{success}</p>}
         <button type="submit" className="w-full bg-yellow-500 text-green-800 p-3 rounded-lg hover:bg-yellow-400 transition-colors font-semibold">
           Sign Up
         </button>

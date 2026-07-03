@@ -1,9 +1,28 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { TrophyIcon, PlusIcon, UserGroupIcon, ArrowRightOnRectangleIcon, ClipboardDocumentListIcon, ShieldCheckIcon } from '@heroicons/react/24/outline'
 
 export default function Home() {
-  const { user, signOut } = useAuth()
+  const { user, signOut, isAdmin } = useAuth()
+  const navigate = useNavigate()
+  const [signingOut, setSigningOut] = useState(false)
+  const [signOutError, setSignOutError] = useState('')
+
+  const handleSignOut = async () => {
+    setSignOutError('')
+    setSigningOut(true)
+
+    try {
+      await signOut()
+      navigate('/login', { replace: true })
+    } catch (err: any) {
+      setSignOutError(err?.message || 'Unable to sign out. Please try again.')
+    } finally {
+      setSigningOut(false)
+    }
+  }
 
   return (
     <div className="max-w-md mx-auto space-y-6">
@@ -30,19 +49,22 @@ export default function Home() {
           <UserGroupIcon className="h-6 w-6 mr-3" />
           Start New Match
         </Link>
-        <Link to="/admin" className="flex items-center justify-center bg-slate-900 text-white p-4 rounded-2xl hover:bg-slate-800 transition-colors shadow-md min-h-14 font-semibold text-base">
-          <ShieldCheckIcon className="h-6 w-6 mr-3" />
-          Admin Panel
-        </Link>
+        {isAdmin && (
+          <Link to="/admin" className="flex items-center justify-center bg-slate-900 text-white p-4 rounded-2xl hover:bg-slate-800 transition-colors shadow-md min-h-14 font-semibold text-base">
+            <ShieldCheckIcon className="h-6 w-6 mr-3" />
+            Admin Panel
+          </Link>
+        )}
       </div>
 
       <div className="text-center">
         {user ? (
           <div className="space-y-2">
             <p className="text-sm text-slate-600">Logged in as {user.email}</p>
-            <button onClick={signOut} className="flex items-center justify-center text-green-600 hover:text-green-800 mx-auto">
+            {signOutError && <p className="text-sm text-red-600">{signOutError}</p>}
+            <button onClick={handleSignOut} disabled={signingOut} className="flex items-center justify-center text-green-600 hover:text-green-800 mx-auto disabled:opacity-60">
               <ArrowRightOnRectangleIcon className="h-4 w-4 mr-1" />
-              Sign Out
+              {signingOut ? 'Signing Out...' : 'Sign Out'}
             </button>
           </div>
         ) : (

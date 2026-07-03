@@ -61,14 +61,7 @@ export default function NewFixture() {
       return
     }
 
-    const { error: insertError } = await supabase.from('fixtures').insert({
-      name,
-      date,
-      team1,
-      team2,
-      overs,
-      created_by: user.id
-    })
+    const { error: insertError } = await supabase.from('fixtures').insert({ name, date, team1, team2, overs })
 
     if (insertError) {
       setError(insertError.message || 'Error creating fixture')

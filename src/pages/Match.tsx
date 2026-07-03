@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeftIcon } from '@heroicons/react/24/outline'
 import { supabase } from '../lib/supabase'
+import { useAuth } from '../contexts/AuthContext'
 
 interface MatchData {
   id: string
@@ -92,6 +93,10 @@ interface SavedInnings {
     ball_number: number
     commentary: string | null
     is_wicket: boolean | null
+    bowler_id?: string | null
+    runs?: number | null
+    extras_runs?: number | null
+    extras_type?: 'wide' | 'noball' | null
   }>
 }
 
@@ -113,8 +118,12 @@ interface SavedInningsRow {
   }>
   balls: Array<{
     ball_number: number
-    commentary: string | null
-    is_wicket: boolean | null
+    commentary?: string | null
+    is_wicket?: boolean | null
+    bowler_id?: string | null
+    runs?: number | null
+    extras_runs?: number | null
+    extras_type?: 'wide' | 'noball' | null
   }>
 }
 
@@ -123,11 +132,13 @@ const OUT_TYPES = ['bowled', 'caught', 'runout', 'lbw', 'stumped']
 export default function Match() {
   const { id } = useParams()
   const navigate = useNavigate()
+  const { user, isAdmin } = useAuth()
 
   const [match, setMatch] = useState<MatchData | null>(null)
   const [players, setPlayers] = useState<Player[]>([])
   const [savedInnings, setSavedInnings] = useState<SavedInnings[]>([])
   const [activeTab, setActiveTab] = useState<'live' | 'scorecard' | 'commentary'>('live')
+  const [scorecardInningsTab, setScorecardInningsTab] = useState<1 | 2>(1)
 
   const [inningsNumber, setInningsNumber] = useState<1 | 2>(1)
   const [currentBattingTeam, setCurrentBattingTeam] = useState('')
@@ -153,11 +164,17 @@ export default function Match() {
   const [commentaryEntries, setCommentaryEntries] = useState<CommentaryEntry[]>([])
   const [extraRunsValue, setExtraRunsValue] = useState(0)
   const [inningsClosed, setInningsClosed] = useState(false)
+  const [matchResult, setMatchResult] = useState('')
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [saveMessage, setSaveMessage] = useState('')
+
+  const canUserEditScorecard = (matchData: MatchData | null) => {
+    if (!user || !matchData) return false
+    return isAdmin || matchData.current_scorer === user.id
+  }
 
   useEffect(() => {
     setLoading(true)
@@ -178,6 +195,23 @@ export default function Match() {
 
   const battingPlayers = useMemo(() => players.filter((player) => player.team === currentBattingTeam), [players, currentBattingTeam])
   const bowlingPlayers = useMemo(() => players.filter((player) => player.team === currentBowlingTeam), [players, currentBowlingTeam])
+  const playerNameById = useMemo(() => {
+    const map: Record<string, string> = {}
+    players.forEach((player) => {
+      map[player.id] = player.name
+    })
+    return map
+  }, [players])
+
+  const isBallsMissingColumnError = (message?: string) => {
+    if (!message) return false
+    return (
+      message.includes("Could not find the 'commentary' column of 'balls'") ||
+      message.includes("Could not find the 'is_wicket' column of 'balls'") ||
+      message.includes('column balls_1.commentary does not exist') ||
+      message.includes('column balls_1.is_wicket does not exist')
+    )
+  }
 
   const initialize = async () => {
     const [matchRes, playersRes] = await Promise.all([
@@ -222,25 +256,89 @@ export default function Match() {
   }
 
   const loadSavedInnings = async (loadedMatch: MatchData) => {
-    const { data, error } = await supabase
-      .from('innings')
-      .select('id, batting_team, bowling_team, total_runs, wickets, overs, scorecard(player_id, runs, balls, fours, sixes, out_type, player:players!scorecard_player_id_fkey(name)), balls(ball_number, commentary, is_wicket)')
-      .eq('match_id', loadedMatch.id)
-      .order('created_at', { ascending: true })
+    const baseSelect =
+      'id, batting_team, bowling_team, total_runs, wickets, overs, scorecard(player_id, runs, balls, fours, sixes, out_type, player:players!scorecard_player_id_fkey(name))'
+    const ballsSelectVariants = [
+      'balls(ball_number, commentary, is_wicket, bowler_id, runs, extras_runs, extras_type)',
+      'balls(ball_number, is_wicket, bowler_id, runs, extras_runs, extras_type)',
+      'balls(ball_number, commentary, bowler_id, runs, extras_runs, extras_type)',
+      'balls(ball_number, bowler_id, runs, extras_runs, extras_type)'
+    ]
 
-    if (error) {
-      setError(error.message || 'Unable to load saved scorecard')
+    let queryData: unknown = null
+    let queryError: { message?: string } | null = null
+
+    for (const ballsSelect of ballsSelectVariants) {
+      const attempt = await supabase
+        .from('innings')
+        .select(`${baseSelect}, ${ballsSelect}`)
+        .eq('match_id', loadedMatch.id)
+        .order('created_at', { ascending: true })
+
+      queryData = attempt.data
+      queryError = attempt.error
+
+      if (!queryError) break
+
+      const isMissingColumnError = isBallsMissingColumnError(queryError.message)
+
+      if (!isMissingColumnError) break
+    }
+
+    if (queryError) {
+      setError(queryError.message || 'Unable to load saved scorecard')
       return
     }
 
-    const innings = ((data || []) as SavedInningsRow[]).map((innings) => ({
+    const innings = (((queryData as SavedInningsRow[] | null) || []) as SavedInningsRow[]).map((innings) => ({
       ...innings,
       scorecard: innings.scorecard.map((row) => ({
         ...row,
         player: Array.isArray(row.player) ? row.player[0] : row.player ?? undefined
+      })),
+      balls: (innings.balls || []).map((ball) => ({
+        ball_number: ball.ball_number,
+        is_wicket: ball.is_wicket ?? null,
+        commentary: ball.commentary ?? null,
+        bowler_id: ball.bowler_id ?? null,
+        runs: ball.runs ?? 0,
+        extras_runs: ball.extras_runs ?? 0,
+        extras_type: ball.extras_type ?? null
       }))
     }))
     setSavedInnings(innings)
+  }
+
+  const getSavedInningsBowlerStats = (innings: SavedInnings): BowlerStat[] => {
+    const aggregated: Record<string, BowlerStat> = {}
+
+    innings.balls.forEach((ball) => {
+      const bowlerId = ball.bowler_id
+      if (!bowlerId) return
+
+      if (!aggregated[bowlerId]) {
+        aggregated[bowlerId] = {
+          playerId: bowlerId,
+          name: playerNameById[bowlerId] || 'Bowler',
+          balls: 0,
+          runsConceded: 0,
+          wickets: 0
+        }
+      }
+
+      const isLegalDelivery = !ball.extras_type
+      if (isLegalDelivery) {
+        aggregated[bowlerId].balls += 1
+      }
+
+      aggregated[bowlerId].runsConceded += (ball.runs ?? 0) + (ball.extras_runs ?? 0)
+
+      if (ball.is_wicket) {
+        aggregated[bowlerId].wickets += 1
+      }
+    })
+
+    return Object.values(aggregated).sort((a, b) => b.wickets - a.wickets || a.name.localeCompare(b.name))
   }
 
   const ensureBatterStat = (player: Player): BatterStat => {
@@ -279,6 +377,10 @@ export default function Match() {
 
   const recordBall = (batRuns: number, extraType?: 'wide' | 'noball', extraRuns = 0) => {
     if (matchEnded || inningsClosed || match?.status === 'completed') return
+    if (!canUserEditScorecard(match ?? null)) {
+      setError('Only the assigned scorer, admin, or superadmin can edit this scorecard')
+      return
+    }
 
     if (!strikerId || !bowlerId) {
       setError('Select striker and bowler before scoring')
@@ -297,21 +399,23 @@ export default function Match() {
     setSaveMessage('')
 
     const isLegal = !extraType
+    const runsFromBat = isLegal ? batRuns : 0
     const totalBallRuns = batRuns + extraRuns
     const ballNumber = getBallNumber()
     const overLabel = `${completedOvers}.${ballsInOver + (isLegal ? 1 : 0)}`
 
-    setTotalRuns((prev) => prev + totalBallRuns)
+    const newTotalRuns = totalRuns + totalBallRuns
+    setTotalRuns(newTotalRuns)
 
     const strikerStat = ensureBatterStat(striker)
     setBatterStats((prev) => ({
       ...prev,
       [striker.id]: {
         ...strikerStat,
-        runs: strikerStat.runs + batRuns,
+        runs: strikerStat.runs + runsFromBat,
         balls: strikerStat.balls + (isLegal ? 1 : 0),
-        fours: strikerStat.fours + (batRuns === 4 ? 1 : 0),
-        sixes: strikerStat.sixes + (batRuns === 6 ? 1 : 0)
+        fours: strikerStat.fours + (runsFromBat === 4 ? 1 : 0),
+        sixes: strikerStat.sixes + (runsFromBat === 6 ? 1 : 0)
       }
     }))
 
@@ -334,40 +438,61 @@ export default function Match() {
       description,
       batsmanId: striker.id,
       bowlerId: bowler.id,
-      runs: batRuns,
+      runs: runsFromBat,
       extrasType: extraType ?? null,
-      extrasRuns: extraType ? extraRuns : 0
+      extrasRuns: extraType ? totalBallRuns : 0
     })
 
     setCurrentOverEvents((prev) => [...prev, extraType ? `${extraType === 'wide' ? 'Wd' : 'Nb'}+${totalBallRuns}` : `${batRuns}`].slice(-6))
 
     if (isLegal) {
-      setBallsInOver((prev) => {
-        const next = prev + 1
-        if (next >= 6) {
-          setCompletedOvers((overs) => overs + 1)
-          setCurrentOverEvents([])
-          setBowlerId('')
-          if (batRuns % 2 === 1) {
-            swapStrike()
-          }
-          return 0
-        }
-        return next
-      })
-    }
+      const nextBallCount = ballsInOver + 1
+      const completedOver = nextBallCount >= 6
 
-    if (batRuns % 2 === 1) {
-      swapStrike()
+      if (completedOver) {
+        setCompletedOvers((overs) => overs + 1)
+        setBallsInOver(0)
+        setCurrentOverEvents([])
+        setBowlerId('')
+      } else {
+        setBallsInOver(nextBallCount)
+      }
+
+      // Swap strike exactly once after each legal ball.
+      // End of over swaps strike automatically; odd runs also swap strike.
+      const shouldSwap = completedOver ? runsFromBat % 2 === 0 : runsFromBat % 2 === 1
+      if (shouldSwap) {
+        swapStrike()
+      }
     }
 
     if (extraType) {
       setExtraRunsValue(0)
     }
+
+    // Chase detection: check if second innings team reached target
+    if (inningsNumber === 2 && firstInnings && !inningsClosed && !matchEnded) {
+      const target = firstInnings.totalRuns + 1
+      if (newTotalRuns >= target) {
+        const wicketsRemaining = battingPlayers.length - wickets
+        const resultMsg =
+          newTotalRuns === firstInnings.totalRuns
+            ? 'Match Tied!'
+            : `${currentBattingTeam} won by ${wicketsRemaining} wicket${wicketsRemaining !== 1 ? 's' : ''}!`
+        setMatchResult(resultMsg)
+        setInningsClosed(true)
+        setMatchEnded(true)
+        setSaveMessage(`${resultMsg} Save scorecard to record the result.`)
+      }
+    }
   }
 
   const recordWicket = () => {
     if (matchEnded || inningsClosed || match?.status === 'completed') return
+    if (!canUserEditScorecard(match ?? null)) {
+      setError('Only the assigned scorer, admin, or superadmin can edit this scorecard')
+      return
+    }
 
     if (!wicketPlayerId || !bowlerId) {
       setError('Select dismissed player and bowler')
@@ -397,6 +522,7 @@ export default function Match() {
       ...prev,
       [bowler.id]: {
         ...bowlerCurrent,
+        balls: bowlerCurrent.balls + 1,
         wickets: bowlerCurrent.wickets + 1
       }
     }))
@@ -418,6 +544,17 @@ export default function Match() {
 
     setWickets((prev) => prev + 1)
     setCurrentOverEvents((prev) => [...prev, 'W'].slice(-6))
+
+    const nextBallCount = ballsInOver + 1
+    if (nextBallCount >= 6) {
+      setCompletedOvers((overs) => overs + 1)
+      setBallsInOver(0)
+      setCurrentOverEvents([])
+      setBowlerId('')
+      swapStrike()
+    } else {
+      setBallsInOver(nextBallCount)
+    }
 
     if (wicketPlayerId === strikerId) setStrikerId('')
     if (wicketPlayerId === nonStrikerId) setNonStrikerId('')
@@ -459,6 +596,10 @@ export default function Match() {
 
   const endInnings = () => {
     if (matchEnded || inningsClosed || match?.status === 'completed') return
+    if (!canUserEditScorecard(match ?? null)) {
+      setError('Only the assigned scorer, admin, or superadmin can end this innings')
+      return
+    }
 
     if (inningsNumber === 1) {
       const snapshot = buildCurrentInningsSnapshot()
@@ -467,15 +608,38 @@ export default function Match() {
       setCurrentBattingTeam(snapshot.bowlingTeam)
       setCurrentBowlingTeam(snapshot.battingTeam)
       resetInningsState()
-      setSaveMessage('Innings 1 ended. Innings 2 started.')
+      setSaveMessage(`Innings 1 ended. Target: ${snapshot.totalRuns + 1} runs. Innings 2 started.`)
       return
     }
 
+    // Innings 2 ended — determine result
+    if (firstInnings) {
+      const firstTotal = firstInnings.totalRuns
+      let resultMsg: string
+      if (totalRuns > firstTotal) {
+        // Already captured by chase detection in recordBall; guard for manual endInnings
+        const wicketsRemaining = battingPlayers.length - wickets
+        resultMsg = `${currentBattingTeam} won by ${wicketsRemaining} wicket${wicketsRemaining !== 1 ? 's' : ''}!`
+      } else if (totalRuns === firstTotal) {
+        resultMsg = 'Match Tied!'
+      } else {
+        const runsDiff = firstTotal - totalRuns
+        resultMsg = `${firstInnings.battingTeam} won by ${runsDiff} run${runsDiff !== 1 ? 's' : ''}!`
+      }
+      setMatchResult(resultMsg)
+      setSaveMessage(`${resultMsg} Save scorecard to record the result.`)
+    }
+
     setInningsClosed(true)
-    setSaveMessage('Second innings finished. End the match to save the final scorecard.')
+    setMatchEnded(true)
   }
 
   const endMatch = () => {
+    if (!canUserEditScorecard(match ?? null)) {
+      setError('Only the assigned scorer, admin, or superadmin can end this match')
+      return
+    }
+
     if (inningsNumber === 1) {
       setError('End innings 1 first before ending match')
       return
@@ -487,6 +651,10 @@ export default function Match() {
 
   const persistScorecard = async () => {
     if (!match) return
+    if (!canUserEditScorecard(match)) {
+      setError('Only the assigned scorer, admin, or superadmin can save this scorecard')
+      return
+    }
 
     setSaving(true)
     setError('')
@@ -566,7 +734,26 @@ export default function Match() {
       }))
 
       if (ballsRows.length > 0) {
-        const { error: ballsError } = await supabase.from('balls').insert(ballsRows)
+        const insertVariants = [
+          ballsRows,
+          ballsRows.map(({ commentary, ...rest }) => rest),
+          ballsRows.map(({ is_wicket, ...rest }) => rest),
+          ballsRows.map(({ commentary, is_wicket, ...rest }) => rest)
+        ]
+
+        let ballsError: { message?: string } | null = null
+
+        for (const rows of insertVariants) {
+          const attempt = await supabase.from('balls').insert(rows)
+          ballsError = attempt.error
+
+          if (!ballsError) break
+
+          const isMissingColumnError = isBallsMissingColumnError(ballsError.message)
+
+          if (!isMissingColumnError) break
+        }
+
         if (ballsError) {
           setSaving(false)
           setError(ballsError.message || 'Unable to save commentary')
@@ -590,9 +777,6 @@ export default function Match() {
       return
     }
 
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
-    await supabase.from('matches').delete().eq('status', 'completed').lt('updated_at', sevenDaysAgo)
-
     await initialize()
     setSaving(false)
     setSaveMessage('score card saved')
@@ -601,6 +785,8 @@ export default function Match() {
   if (loading) return <div className="text-center text-slate-600">Loading match...</div>
   if (error && !match) return <div className="text-center text-red-600">{error}</div>
   if (!match) return <div className="text-center text-slate-600">Match not found.</div>
+
+  const canEditScorecard = canUserEditScorecard(match)
 
   const oversLimitLabel = `${completedOvers}.${ballsInOver} / ${match.fixture.overs}.0`
 
@@ -667,7 +853,10 @@ export default function Match() {
 
   const renderSavedBattingTable = (innings: SavedInnings) => (
     <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-4">
-      <h3 className="font-semibold text-green-900 mb-3">{innings.batting_team} Batting</h3>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-semibold text-green-900">{innings.batting_team} Batting</h3>
+        <span className="text-lg font-bold text-green-800">{innings.total_runs}/{innings.wickets} <span className="text-xs font-normal text-slate-500">({innings.overs} ov)</span></span>
+      </div>
       <div className="grid grid-cols-6 gap-2 text-xs font-semibold text-slate-500 px-2 pb-2 border-b border-slate-200">
         <div className="col-span-2">Player</div>
         <div className="text-center">Runs</div>
@@ -688,6 +877,106 @@ export default function Match() {
       </div>
     </div>
   )
+
+  const renderSavedBowlingTable = (innings: SavedInnings) => {
+    const rows = getSavedInningsBowlerStats(innings)
+
+    return (
+      <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-4">
+        <h3 className="font-semibold text-green-900 mb-3">{innings.bowling_team} Bowling</h3>
+        <div className="grid grid-cols-5 gap-2 text-xs font-semibold text-slate-500 px-2 pb-2 border-b border-slate-200">
+          <div className="col-span-2">Player</div>
+          <div className="text-center">Overs</div>
+          <div className="text-center">Runs</div>
+          <div className="text-right">Wkts</div>
+        </div>
+        <div className="space-y-2 mt-2">
+          {rows.length === 0 && <p className="text-sm text-slate-500 px-2">No bowling events yet.</p>}
+          {rows.map((row) => {
+            const overs = `${Math.floor(row.balls / 6)}.${row.balls % 6}`
+            return (
+              <div key={`${innings.id}-${row.playerId}`} className="grid grid-cols-5 gap-2 text-sm p-2 rounded-lg bg-slate-50">
+                <div className="col-span-2 truncate text-slate-800 font-medium">{row.name}</div>
+                <div className="text-center">{overs}</div>
+                <div className="text-center">{row.runsConceded}</div>
+                <div className="text-right">{row.wickets}</div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
+
+  const renderSnapshotBattingTable = (innings: InningsSnapshot, label: string) => {
+    const rows = Object.values(innings.batterStats)
+      .filter((row) => row.runs > 0 || row.balls > 0 || row.isOut)
+      .sort((a, b) => b.runs - a.runs)
+
+    return (
+      <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-4">
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <h3 className="font-semibold text-green-900">{innings.battingTeam} Batting</h3>
+          <div className="flex items-center gap-2">
+            <span className="text-lg font-bold text-green-800">{innings.totalRuns}/{innings.wickets} <span className="text-xs font-normal text-slate-500">({innings.completedOvers}.{innings.ballsInOver} ov)</span></span>
+            <span className="text-xs rounded-full bg-green-50 px-2 py-1 text-green-800">{label}</span>
+          </div>
+        </div>
+        <div className="grid grid-cols-6 gap-2 text-xs font-semibold text-slate-500 px-2 pb-2 border-b border-slate-200">
+          <div className="col-span-2">Player</div>
+          <div className="text-center">Runs</div>
+          <div className="text-center">Balls</div>
+          <div className="text-center">4s/6s</div>
+          <div className="text-right">Dismissed</div>
+        </div>
+        <div className="space-y-2 mt-2">
+          {rows.length === 0 && <p className="text-sm text-slate-500 px-2">No batting events yet.</p>}
+          {rows.map((row) => (
+            <div key={`${innings.battingTeam}-${row.playerId}`} className="grid grid-cols-6 gap-2 text-sm p-2 rounded-lg bg-slate-50">
+              <div className="col-span-2 truncate text-slate-800 font-medium">{row.name}</div>
+              <div className="text-center">{row.runs}</div>
+              <div className="text-center">{row.balls}</div>
+              <div className="text-center">{row.fours}/{row.sixes}</div>
+              <div className="text-right text-xs text-slate-500">{row.isOut ? row.outType : 'No'}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  const renderSnapshotBowlingTable = (innings: InningsSnapshot, label: string) => {
+    const rows = Object.values(innings.bowlerStats).sort((a, b) => b.wickets - a.wickets || a.name.localeCompare(b.name))
+
+    return (
+      <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-4">
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <h3 className="font-semibold text-green-900">{innings.bowlingTeam} Bowling</h3>
+          <span className="text-xs rounded-full bg-green-50 px-2 py-1 text-green-800">{label}</span>
+        </div>
+        <div className="grid grid-cols-5 gap-2 text-xs font-semibold text-slate-500 px-2 pb-2 border-b border-slate-200">
+          <div className="col-span-2">Player</div>
+          <div className="text-center">Overs</div>
+          <div className="text-center">Runs</div>
+          <div className="text-right">Wkts</div>
+        </div>
+        <div className="space-y-2 mt-2">
+          {rows.length === 0 && <p className="text-sm text-slate-500 px-2">No bowling events yet.</p>}
+          {rows.map((row) => {
+            const overs = `${Math.floor(row.balls / 6)}.${row.balls % 6}`
+            return (
+              <div key={`${innings.bowlingTeam}-${row.playerId}`} className="grid grid-cols-5 gap-2 text-sm p-2 rounded-lg bg-slate-50">
+                <div className="col-span-2 truncate text-slate-800 font-medium">{row.name}</div>
+                <div className="text-center">{overs}</div>
+                <div className="text-center">{row.runsConceded}</div>
+                <div className="text-right">{row.wickets}</div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
 
   const renderCommentary = (entries: CommentaryEntry[]) => (
     <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-4">
@@ -730,6 +1019,17 @@ export default function Match() {
           </div>
         </div>
         <div className="mt-2 text-xs text-slate-600">Toss: {match.toss_winner} elected to {match.elected_to_bat}</div>
+        {matchResult && (
+          <div className="mt-3 rounded-xl bg-green-700 text-white text-center font-bold text-base px-4 py-2">
+            🏆 {matchResult}
+          </div>
+        )}
+        {inningsNumber === 2 && firstInnings && !matchResult && match.status !== 'completed' && (
+          <div className="mt-3 rounded-xl bg-yellow-50 border border-yellow-200 px-4 py-2 flex items-center justify-between text-sm">
+            <span className="text-yellow-900 font-semibold">Target: {firstInnings.totalRuns + 1}</span>
+            <span className="text-yellow-800">Need <strong>{Math.max(0, firstInnings.totalRuns + 1 - totalRuns)}</strong> more runs</span>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-3 bg-white rounded-2xl border border-green-100 overflow-hidden">
@@ -740,11 +1040,16 @@ export default function Match() {
 
       {activeTab === 'live' && match.status !== 'completed' && (
         <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-4 space-y-4">
+          {!canEditScorecard && (
+            <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-900">
+              Only the assigned scorer for this match (or admin/superadmin) can edit this scorecard.
+            </div>
+          )}
           <div className="text-xs font-medium text-slate-500">Current Over: {oversLimitLabel}</div>
 
           <div className="space-y-2">
             <div className="flex items-center gap-2">
-              <select value={strikerId} onChange={(e) => setStrikerId(e.target.value)} className="flex-1 p-3 border border-green-300 rounded-xl">
+              <select value={strikerId} onChange={(e) => setStrikerId(e.target.value)} disabled={!canEditScorecard} className="flex-1 p-3 border border-green-300 rounded-xl disabled:opacity-60">
                 <option value="">Select striker</option>
                 {battingPlayers.filter((p) => !batterStats[p.id]?.isOut || p.id === strikerId).map((player) => (
                   <option key={player.id} value={player.id}>{player.name}</option>
@@ -754,7 +1059,7 @@ export default function Match() {
             </div>
 
             <div className="flex items-center gap-2">
-              <select value={nonStrikerId} onChange={(e) => setNonStrikerId(e.target.value)} className="flex-1 p-3 border border-green-300 rounded-xl">
+              <select value={nonStrikerId} onChange={(e) => setNonStrikerId(e.target.value)} disabled={!canEditScorecard} className="flex-1 p-3 border border-green-300 rounded-xl disabled:opacity-60">
                 <option value="">Select non-striker</option>
                 {battingPlayers.filter((p) => !batterStats[p.id]?.isOut || p.id === nonStrikerId).map((player) => (
                   <option key={player.id} value={player.id}>{player.name}</option>
@@ -764,7 +1069,7 @@ export default function Match() {
             </div>
 
             <div className="flex items-center gap-2">
-              <select value={bowlerId} onChange={(e) => setBowlerId(e.target.value)} className="flex-1 p-3 border border-green-300 rounded-xl">
+              <select value={bowlerId} onChange={(e) => setBowlerId(e.target.value)} disabled={!canEditScorecard} className="flex-1 p-3 border border-green-300 rounded-xl disabled:opacity-60">
                 <option value="">Select bowler ({currentBowlingTeam})</option>
                 {bowlingPlayers.map((player) => (
                   <option key={player.id} value={player.id}>{player.name}</option>
@@ -776,13 +1081,13 @@ export default function Match() {
 
           <div className="grid grid-cols-3 gap-2">
             {[0, 1, 2, 3, 4, 6].map((run) => (
-              <button key={run} onClick={() => recordBall(run)} disabled={matchEnded} className="bg-green-700 text-white p-3 rounded-xl font-bold hover:bg-green-600 disabled:opacity-50">{run}</button>
+              <button key={run} onClick={() => recordBall(run)} disabled={matchEnded || !canEditScorecard} className="bg-green-700 text-white p-3 rounded-xl font-bold hover:bg-green-600 disabled:opacity-50">{run}</button>
             ))}
           </div>
 
           <div className="grid grid-cols-2 gap-2">
-            <button onClick={() => recordBall(extraRunsValue, 'wide', 1)} disabled={matchEnded || inningsClosed} className="bg-yellow-500 text-green-900 p-3 rounded-xl font-semibold hover:bg-yellow-400 disabled:opacity-50">Wide + {extraRunsValue + 1}</button>
-            <button onClick={() => recordBall(extraRunsValue, 'noball', 1)} disabled={matchEnded || inningsClosed} className="bg-yellow-500 text-green-900 p-3 rounded-xl font-semibold hover:bg-yellow-400 disabled:opacity-50">No Ball + {extraRunsValue + 1}</button>
+            <button onClick={() => recordBall(extraRunsValue, 'wide', 1)} disabled={matchEnded || inningsClosed || !canEditScorecard} className="bg-yellow-500 text-green-900 p-3 rounded-xl font-semibold hover:bg-yellow-400 disabled:opacity-50">Wide + {extraRunsValue}</button>
+            <button onClick={() => recordBall(extraRunsValue, 'noball', 1)} disabled={matchEnded || inningsClosed || !canEditScorecard} className="bg-yellow-500 text-green-900 p-3 rounded-xl font-semibold hover:bg-yellow-400 disabled:opacity-50">No Ball + {extraRunsValue}</button>
           </div>
 
           <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-3 space-y-2">
@@ -796,7 +1101,8 @@ export default function Match() {
                   key={value}
                   type="button"
                   onClick={() => setExtraRunsValue(value)}
-                  className={`rounded-xl px-3 py-2 text-sm font-semibold ${extraRunsValue === value ? 'bg-green-700 text-white' : 'bg-white text-green-900 border border-green-200'}`}
+                  disabled={!canEditScorecard}
+                  className={`rounded-xl px-3 py-2 text-sm font-semibold ${extraRunsValue === value ? 'bg-green-700 text-white' : 'bg-white text-green-900 border border-green-200'} disabled:opacity-50`}
                 >
                   {value}
                 </button>
@@ -807,7 +1113,7 @@ export default function Match() {
           <div className="border border-red-200 rounded-xl p-3 bg-red-50 space-y-2">
             <p className="text-sm font-semibold text-red-700">Record Wicket</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              <select value={wicketPlayerId} onChange={(e) => setWicketPlayerId(e.target.value)} className="w-full p-3 border border-red-200 rounded-xl">
+              <select value={wicketPlayerId} onChange={(e) => setWicketPlayerId(e.target.value)} disabled={!canEditScorecard} className="w-full p-3 border border-red-200 rounded-xl disabled:opacity-60">
                 <option value="">Dismissed batsman</option>
                 {[strikerId, nonStrikerId].filter(Boolean).map((pid) => {
                   const p = battingPlayers.find((x) => x.id === pid)
@@ -815,13 +1121,13 @@ export default function Match() {
                   return <option key={p.id} value={p.id}>{p.name}</option>
                 })}
               </select>
-              <select value={outType} onChange={(e) => setOutType(e.target.value)} className="w-full p-3 border border-red-200 rounded-xl">
+              <select value={outType} onChange={(e) => setOutType(e.target.value)} disabled={!canEditScorecard} className="w-full p-3 border border-red-200 rounded-xl disabled:opacity-60">
                 {OUT_TYPES.map((type) => (
                   <option key={type} value={type}>{type}</option>
                 ))}
               </select>
             </div>
-            <button onClick={recordWicket} disabled={matchEnded || inningsClosed} className="w-full bg-red-600 text-white p-3 rounded-xl font-semibold hover:bg-red-500 disabled:opacity-50">Wicket</button>
+            <button onClick={recordWicket} disabled={matchEnded || inningsClosed || !canEditScorecard} className="w-full bg-red-600 text-white p-3 rounded-xl font-semibold hover:bg-red-500 disabled:opacity-50">Wicket</button>
           </div>
 
           <div className="text-xs text-slate-500">Current over events: {currentOverEvents.length ? currentOverEvents.join(' | ') : 'No balls yet'}</div>
@@ -829,8 +1135,8 @@ export default function Match() {
           {renderLiveBowlingTable()}
 
           <div className="grid grid-cols-2 gap-2">
-            <button onClick={endInnings} disabled={matchEnded || inningsClosed} className="bg-slate-800 text-white p-3 rounded-xl font-semibold hover:bg-slate-700 disabled:opacity-50">End Innings</button>
-            <button onClick={endMatch} disabled={inningsNumber === 1 || matchEnded} className="bg-red-700 text-white p-3 rounded-xl font-semibold hover:bg-red-600 disabled:opacity-50">End Match</button>
+            <button onClick={endInnings} disabled={matchEnded || inningsClosed || !canEditScorecard} className="bg-slate-800 text-white p-3 rounded-xl font-semibold hover:bg-slate-700 disabled:opacity-50">End Innings</button>
+            <button onClick={endMatch} disabled={inningsNumber === 1 || matchEnded || !canEditScorecard} className="bg-red-700 text-white p-3 rounded-xl font-semibold hover:bg-red-600 disabled:opacity-50">End Match</button>
           </div>
         </div>
       )}
@@ -853,14 +1159,56 @@ export default function Match() {
 
       {activeTab === 'scorecard' && (
         <div className="space-y-4">
+          <div className="grid grid-cols-2 bg-white rounded-2xl border border-green-100 overflow-hidden">
+            <button
+              onClick={() => setScorecardInningsTab(1)}
+              className={`p-3 text-sm font-semibold ${scorecardInningsTab === 1 ? 'bg-green-700 text-white' : 'bg-white text-green-800'}`}
+            >
+              1st Innings
+            </button>
+            <button
+              onClick={() => setScorecardInningsTab(2)}
+              className={`p-3 text-sm font-semibold ${scorecardInningsTab === 2 ? 'bg-green-700 text-white' : 'bg-white text-green-800'}`}
+            >
+              2nd Innings
+            </button>
+          </div>
+
           {savedInnings.length > 0 ? (
-            savedInnings.map((innings) => renderSavedBattingTable(innings))
+            (() => {
+              const selectedSavedInnings = savedInnings[scorecardInningsTab - 1]
+              if (!selectedSavedInnings) {
+                return <p className="text-sm text-slate-500 text-center">Innings {scorecardInningsTab} has not been saved yet.</p>
+              }
+
+              return (
+                <>
+                  {renderSavedBattingTable(selectedSavedInnings)}
+                  {renderSavedBowlingTable(selectedSavedInnings)}
+                </>
+              )
+            })()
           ) : (
-            <>
-              {firstInnings && renderLiveBattingTable()}
-              {renderLiveBattingTable()}
-              {renderLiveBowlingTable()}
-            </>
+            (() => {
+              const currentSnapshot = buildCurrentInningsSnapshot()
+              const snapshotForTab =
+                scorecardInningsTab === 1
+                  ? firstInnings ?? (inningsNumber === 1 ? currentSnapshot : null)
+                  : inningsNumber === 2
+                    ? currentSnapshot
+                    : null
+
+              if (!snapshotForTab) {
+                return <p className="text-sm text-slate-500 text-center">Innings {scorecardInningsTab} has not started yet.</p>
+              }
+
+              return (
+                <>
+                  {renderSnapshotBattingTable(snapshotForTab, `Innings ${scorecardInningsTab}`)}
+                  {renderSnapshotBowlingTable(snapshotForTab, `Innings ${scorecardInningsTab}`)}
+                </>
+              )
+            })()
           )}
         </div>
       )}
@@ -892,7 +1240,7 @@ export default function Match() {
       {saveMessage && <p className="text-green-700 text-center font-medium">{saveMessage}</p>}
 
       {match.status !== 'completed' && (
-        <button onClick={persistScorecard} disabled={saving} className="w-full bg-green-800 text-white p-3 rounded-xl hover:bg-green-700 disabled:opacity-60 font-semibold">
+        <button onClick={persistScorecard} disabled={saving || !canEditScorecard} className="w-full bg-green-800 text-white p-3 rounded-xl hover:bg-green-700 disabled:opacity-60 font-semibold">
           {saving ? 'Saving...' : 'Save Scorecard'}
         </button>
       )}

@@ -1,21 +1,50 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useAuth } from '../contexts/AuthContext'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, Link, useLocation } from 'react-router-dom'
 
 export default function Login() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
-  const { signIn } = useAuth()
+  const [submitting, setSubmitting] = useState(false)
+  const { signIn, user, loading } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
+  const notice = (location.state as { notice?: string } | null)?.notice
+
+  useEffect(() => {
+    if (!loading && user) {
+      navigate('/', { replace: true })
+    }
+  }, [user, loading, navigate])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    setError('')
+    setSubmitting(true)
+
+    const normalizedEmail = email.trim()
+
     try {
-      await signIn(email, password)
-      navigate('/')
+      await signIn(normalizedEmail, password)
+      navigate('/', { replace: true })
+
+      // HashRouter fallback for environments where route state update is delayed.
+      if (window.location.hash !== '#/') {
+        window.location.hash = '#/'
+      }
     } catch (err: any) {
-      setError(err.message || 'Invalid credentials')
+      const message = err?.message || 'Invalid credentials'
+
+      if (message.toLowerCase().includes('invalid login credentials')) {
+        setError('Invalid login credentials. If you recently signed up, please confirm your email first, then try again.')
+        setSubmitting(false)
+        return
+      }
+
+      setError(message)
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -23,6 +52,7 @@ export default function Login() {
     <div className="max-w-md mx-auto">
       <h1 className="text-2xl font-bold text-center mb-6 text-green-800">Sign In</h1>
       <form onSubmit={handleSubmit} className="space-y-4">
+        {notice && <p className="text-green-700 text-center">{notice}</p>}
         <input
           type="email"
           placeholder="Email"
@@ -40,8 +70,8 @@ export default function Login() {
           required
         />
         {error && <p className="text-red-500 text-center">{error}</p>}
-        <button type="submit" className="w-full bg-green-600 text-white p-3 rounded-lg hover:bg-green-500 transition-colors font-semibold">
-          Sign In
+        <button type="submit" disabled={submitting} className="w-full bg-green-600 text-white p-3 rounded-lg hover:bg-green-500 transition-colors font-semibold disabled:opacity-60">
+          {submitting ? 'Signing In...' : 'Sign In'}
         </button>
       </form>
       <p className="text-center mt-4">
